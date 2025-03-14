@@ -1,93 +1,109 @@
-# 这个文件是所有的“工具函数”的所在
-import pandas as pd
+import duckdb
 from openai import OpenAI
 from dashscope import Application
 from http import HTTPStatus
-from dashscope import Application
 import os
+import json
+import pandas as pd
 from collections import deque
 import re
-import os
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
-def open_df():
-    # 读取数据
-    df = load_data('./data/all.csv')
-    return df
-def load_data(csv_path):
-    df = pd.read_csv(csv_path)
-    return df
+def initialize_duckdb():
+    """初始化DuckDB数据库，将CSV数据导入到持久化数据库中"""
+    db_path = './data/all.duckdb'
+    csv_path = './data/all.csv'
+    if not os.path.exists(db_path):
+        conn = duckdb.connect(db_path)
+        conn.execute(f"CREATE TABLE df AS SELECT * FROM read_csv('{csv_path}')")
+        conn.close()
 
-def filter_dataframe(df, keywords_list):
-    # 处理关键词列表为空的情况
-    if not keywords_list:
-        return pd.DataFrame(columns=df.columns)
-    # 创建副本避免修改原DataFrame
-    df = df.copy()
-    # 生成分组标识：主帖用post_code，评论用Root_code
-    df['group_id'] = df['Root_code'].fillna(df['post_code'])
-    # 检查内容是否包含所有关键词
-    def contains_all_keywords(content):
-        if pd.isna(content):
-            return False
-        return all(keyword in content for keyword in keywords_list)
-    # 应用检查函数
-    mask = df['content'].apply(contains_all_keywords)
-    # 获取所有匹配的分组ID
-    matched_groups = df.loc[mask, 'group_id'].unique()
-    # 过滤出所有匹配分组的数据
-    filtered_df = df[df['group_id'].isin(matched_groups)].copy()
-    # 移除临时列
-    filtered_df.drop(columns=['group_id'], inplace=True)
-    # 返回结果，确保列顺序与原始DataFrame一致
-    return filtered_df
+initialize_duckdb()  # 应用启动时初始化数据库
 
-def convert_df_to_forum(df):
-    forum_data = {"posts": []}
-    
-    # 先筛选出主帖子（Root_code 为空的）
-    posts = df[df["Root_code"].isna()].copy()
-    
-    # 先构建基础的帖子字典
-    post_dict = {}
-    for _, post in posts.iterrows():
-        post_dict[post["post_code"]] = {
-            "id": post["id"],
-            "content": post["content"],
-            "comments": []  # 先留空，后续填充
-        }
-    
-    # 筛选出所有评论（Root_code 不为空的）
-    comments = df[df["Root_code"].notna()].copy()
-    
-    # 将评论添加到对应的帖子中
-    for _, comment in comments.iterrows():
-        root_code = comment["Root_code"]  # 获取所属帖子 post_code
-        if root_code in post_dict:  # 确保主帖存在
-            post_dict[root_code]["comments"].append({
-                "id": comment["id"],
-                "content": comment["content"]
+def filter_dataframe(keywords_list):
+    """使用DuckDB进行高效数据过滤"""
+    if not keywords_list or not all(keywords_list):
+        return pd.DataFrame()
+
+    conn = duckdb.connect('./data/all.duckdb', read_only=True)
+    try:
+        # 构建动态查询条件
+        conditions = []
+        params = []
+        for keyword in keywords_list:
+            conditions.append("content LIKE ?")
+            params.append(f"%{keyword}%")
+        
+        where_clause = " AND ".join(conditions) if conditions else "1=0"
+        
+        query = f"""
+            WITH filtered_groups AS (
+                SELECT COALESCE(Root_code, post_code) AS group_id
+                FROM df
+                WHERE {where_clause}
+                GROUP BY group_id
+            )
+            SELECT * 
+            FROM df
+            WHERE COALESCE(Root_code, post_code) IN (SELECT group_id FROM filtered_groups)
+        """
+        return conn.execute(query, params).fetchdf()
+    finally:
+        conn.close()
+
+def convert_df_to_forum(temp_df):
+    """使用DuckDB高效构建论坛数据结构"""
+    if temp_df.empty:
+        final={}
+        final["type"]="exact"
+        final["results"]={"posts": posts}
+        return {"posts": []}
+
+    conn = duckdb.connect()
+    try:
+        conn.register('temp_df', temp_df)
+        query = """
+            WITH main_posts AS (
+                SELECT * FROM temp_df WHERE Root_code IS NULL
+            ),
+            comments AS (
+                SELECT * FROM temp_df WHERE Root_code IS NOT NULL
+            )
+            SELECT 
+                main.id,
+                main.content,
+                COALESCE((
+                    SELECT json_group_array(json_object('id', c.id, 'content', c.content))
+                    FROM comments c 
+                    WHERE c.Root_code = main.post_code
+                ), '[]') AS comments
+            FROM main_posts main
+        """
+        result = conn.execute(query).fetchall()
+        
+        posts = []
+        for row in result:
+            try:
+                comments = json.loads(row[2])
+            except:
+                comments = []
+            posts.append({
+                "id": row[0],
+                "content": row[1],
+                "comments": comments
             })
-    
-    # 组装最终的 forum_data
-    forum_data["posts"] = list(post_dict.values())
-    final={}
-    final["type"]="exact"
-    final["results"]=forum_data
-    
-    return final
-
+            # print({"posts": posts})
+        final={}
+        final["type"]="exact"
+        final["results"]={"posts": posts}
+        return final
+    finally:
+        conn.close()
 
 def truncate_dataframe(df: pd.DataFrame, max_size: int) -> pd.DataFrame:
-    """
-    截断 DataFrame，使其总大小不超过 max_size 字节。
-    
-    :param df: 输入的 pandas DataFrame。
-    :param max_size: 允许的最大字节数。
-    :return: 截断后的 DataFrame。
-    """
+    """截断DataFrame（保留Pandas处理小数据集）"""
+    # 原有实现保持不变，因处理的是过滤后的小数据
     total_size = df.memory_usage(deep=True).sum()
-    
     if total_size <= max_size:
         return df
     
@@ -97,9 +113,12 @@ def truncate_dataframe(df: pd.DataFrame, max_size: int) -> pd.DataFrame:
         if new_size > max_size:
             break
         truncated_df = pd.concat([truncated_df, df.iloc[i:i+1]], ignore_index=True)
-    
     return truncated_df
+
 def AI_search(query):
+    """AI搜索处理逻辑（保持原有结构，适配DuckDB）"""
+    # 原有AI处理逻辑保持不变...
+    # 示例核心处理部分：
     os.environ['DASHSCOPE_HTTP_BASE_URL'] = 'https://dashscope.aliyuncs.com/api/v1/'
     print("msg sent")
     stage1='''
@@ -133,23 +152,23 @@ def AI_search(query):
     if keywd_list==[]:
         return "出错啦！可能是因为您的输入不是一个请求或者AI出现了幻觉，请重新搜索"
     
-    target_df=filter_dataframe(df,keywd_list[0])
-    target_df=truncate_dataframe(target_df, 1024*512)
-    with open('./data/target.csv', 'w', encoding='utf-8') as f:
-        target_df.to_csv(f, index=False)
-    forum_data=convert_df_to_forum(target_df)
+    target_df = filter_dataframe(keywd_list[0])
+    target_df = truncate_dataframe(target_df, 1024*512)
     
+    # 保存和后续处理
+    target_df.to_csv('./data/target.csv', index=False)
+    forum_data = convert_df_to_forum(target_df)
+    
+    # ...后续处理逻辑
     stage2='''
     你现在需要帮助一名中国人民大学的学生用户从下面的格式化消息中总结信息。信息：
     '''
     stage2+=str(forum_data)
     stage2+="\n用户请求："
-    stage2+=query 
+    stage2+=query   
     response = Application.call(
         # 若没有配置环境变量，可用百炼API Key将下行替换为：api_key="sk-xxx"。但不建议在生产环境中直接将API Key硬编码到代码中，以减少API Key泄露风险。
         api_key='',
         app_id='c3cc0a7b365d4b2da7cb88ebd1aef1a0',# 替换为实际的应用 ID
         prompt=stage2)
     return response.output.text
-
-df=open_df()
