@@ -15,13 +15,19 @@ def initialize_duckdb():
     csv_path = './data/all.csv'
     if not os.path.exists(db_path):
         conn = duckdb.connect(db_path)
-        conn.execute(f"CREATE TABLE df AS SELECT * FROM read_csv('{csv_path}')")
+        # 添加时间字段处理
+        conn.execute(f"""
+            CREATE TABLE df AS 
+            SELECT *,
+                substr(post_code,1,4) || '-' || substr(post_code,5,2) || '-' || substr(post_code,7,2) as post_time 
+            FROM read_csv('{csv_path}')
+        """)
         conn.close()
 
 initialize_duckdb()  # 应用启动时初始化数据库
-
 def filter_dataframe(keywords_list):
-    """使用DuckDB进行高效数据过滤"""
+    # ...前面代码保持不变...
+#     """使用DuckDB进行高效数据过滤"""
     if not keywords_list or not all(keywords_list):
         return pd.DataFrame()
 
@@ -33,7 +39,6 @@ def filter_dataframe(keywords_list):
         for keyword in keywords_list:
             conditions.append("content LIKE ?")
             params.append(f"%{keyword}%")
-        
         where_clause = " AND ".join(conditions) if conditions else "1=0"
         
         query = f"""
@@ -43,19 +48,25 @@ def filter_dataframe(keywords_list):
                 WHERE {where_clause}
                 GROUP BY group_id
             )
-            SELECT * 
+            SELECT *,
+                post_code  
             FROM df
             WHERE COALESCE(Root_code, post_code) IN (SELECT group_id FROM filtered_groups)
         """
         return conn.execute(query, params).fetchdf()
     finally:
         conn.close()
-
-def convert_df_to_forum(temp_df):
+def convert_df_to_forum(temp_df, keywords_list):
     """使用DuckDB高效构建论坛数据结构"""
     if temp_df.empty:
         final={}
         final["type"]="exact"
+        posts = []
+        posts.append({
+            "id": 0,
+            "content": "没有找到相关信息",
+            "comments": []
+        })
         final["results"]={"posts": posts}
         return {"posts": []}
 
@@ -64,41 +75,71 @@ def convert_df_to_forum(temp_df):
         conn.register('temp_df', temp_df)
         query = """
             WITH main_posts AS (
-                SELECT * FROM temp_df WHERE Root_code IS NULL
+                SELECT 
+                    id,
+                    content,
+                    post_code,
+                    post_code
+                FROM temp_df WHERE Root_code IS NULL
             ),
             comments AS (
-                SELECT * FROM temp_df WHERE Root_code IS NOT NULL
+                SELECT 
+                    id,
+                    content,
+                    post_code,
+                    Root_code
+                FROM temp_df WHERE Root_code IS NOT NULL
             )
             SELECT 
                 main.id,
                 main.content,
+                main.post_code,
                 COALESCE((
-                    SELECT json_group_array(json_object('id', c.id, 'content', c.content))
+                    SELECT json_group_array(json_object(
+                        'id', c.id, 
+                        'content', c.content,
+                        'post_code', c.post_code
+                    ))
                     FROM comments c 
                     WHERE c.Root_code = main.post_code
                 ), '[]') AS comments
             FROM main_posts main
         """
         result = conn.execute(query).fetchall()
-        
+        # 高亮处理逻辑
+        def highlight_keywords(text):
+            for keyword in keywords_list:
+                if keyword:
+                    text = text.replace(keyword, f'<mark>{keyword}</mark>')
+            return text
+
         posts = []
         for row in result:
-            try:
-                comments = json.loads(row[2])
-            except:
-                comments = []
+            highlighted_content = highlight_keywords(row[1])
+            comments = json.loads(row[3]) if row[3] else []
+            
+            highlighted_comments = []
+            for comment in comments:
+                comment['content'] = highlight_keywords(comment['content'])
+                highlighted_comments.append(comment)
+            
             posts.append({
                 "id": row[0],
-                "content": row[1],
-                "comments": comments
+                "content": highlighted_content,
+                "post_time": row[2],
+                "comments": highlighted_comments,
+                "comment_count": len(highlighted_comments)  # 添加评论数用于排序
             })
-            # print({"posts": posts})
+
+        # 添加默认按时间排序
+        posts.sort(key=lambda x: x['post_time'], reverse=True)
         final={}
         final["type"]="exact"
-        final["results"]={"posts": posts}
+        final["results"] = {"posts": posts}
         return final
     finally:
         conn.close()
+
 
 def truncate_dataframe(df: pd.DataFrame, max_size: int) -> pd.DataFrame:
     """截断DataFrame（保留Pandas处理小数据集）"""

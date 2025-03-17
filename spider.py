@@ -15,6 +15,9 @@ os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 由于各种问题，all.csv中的日期可能是错的，未来需要重爬
 '''
+df=pd.read_csv('./data/all.csv')
+df = df[pd.to_numeric(df['id'], errors='coerce').notnull()]
+df['id'] = df['id'].astype(int)
 def renew_start_id():
     with open('start_id.txt', 'w') as f:
         f.write(str(get_start_id()+4000))
@@ -28,13 +31,12 @@ def get_newest_id():
             print(f"newest_id is {newest_id}")
     return newest_id
 def get_last_id():
-    df=pd.read_csv('./data/all.csv')
-    print(df["id"].max())
+    # df=pd.read_csv('./data/all.csv')
+    # print(df["id"].max())
     with open('last_id.txt', 'w') as f:
         f.write(str(int(df["id"].max())))
     return int(df["id"].max())
 def get_start_id():#这个是爬取刚开始时最新帖子的id，和newest_id不同的是他只在一次爬取结束（爬完newest_id到last_id）时才更新，而不是每爬一个帖子就更新
-    df=pd.read_csv('./data/all.csv')
     return int(df["id"].max())
 
 def get_all_posts(root_file_path: str, comment_file_path: str, newest_id,last_id=0):
@@ -270,15 +272,41 @@ def combine_posts(root_path: str, comment_path: str) -> pd.DataFrame:
 # 使用示例
 def concat_csv(dest_path,append_path):
     df1 = pd.read_csv(dest_path)
+    df1['id'] = df1['id'].astype(str)
     df2 = pd.read_csv(append_path)
+    df2['id'] = df2['id'].astype(str)
+    df2=df2.drop_duplicates()
     df_combined = pd.concat([df1, df2], ignore_index=True)
     print("结合成果")
     # 按 'id' 降序排序
     df_combined = df_combined.sort_values(by='id', ascending=False)
+    df_combined=df_combined.drop_duplicates()
 
     # 保存合并后的 CSV 文件
     df_combined.to_csv('./data/all.csv', index=False)
     return
+def clean_csv(csv_path, output_path=None):
+    # 读取CSV
+    df = pd.read_csv(csv_path)
+    
+    # 删除前三列（如果存在）
+    cols_to_drop = [ 'Unnamed: 0']
+    df = df.drop(columns=[col for col in cols_to_drop if col in df.columns])
+    
+    # 删除前两行数据（按位置）
+    df = df.iloc[2:].reset_index(drop=True)
+    
+    # 写回CSV，默认覆盖原文件
+    if output_path is None:
+        output_path = csv_path
+
+    df = df[pd.to_numeric(df['id'], errors='coerce').notnull()]
+    df['id'] = df['id'].astype(int)
+    df=df.drop_duplicates(subset='id', keep='first')
+    
+    df.to_csv(output_path, index=False)
+    print(f"已清洗并保存到 {output_path}")
+
 if __name__ == "__main__":
     with open('start_id.txt', 'w') as f:
         start_id = get_start_id()
@@ -286,4 +314,5 @@ if __name__ == "__main__":
     get_all_posts("./data/root_posts.csv", "./data/comments.csv", newest_id=renew_start_id(),last_id=get_last_id())
     combine_posts("./data/root_posts.csv", "./data/comments.csv").to_csv("./data/temp.csv", index=False)
     concat_csv('./data/all.csv','./data/temp.csv')
+    clean_csv('./data/all.csv')
     

@@ -20,13 +20,15 @@ def handle_search():
     data = request.json
     search_type = data.get('type')
     query = data.get('query')
+    with open('./data/query.txt', 'a') as f:
+        f.write(str(query)+str(datetime.now()) + '\n')
 
     if search_type == 'exact':
         if not query or len(query[0]) == 0:
             return jsonify([])
         
         temp_df = utils.filter_dataframe(query)
-        result = utils.convert_df_to_forum(temp_df)
+        result = utils.convert_df_to_forum(temp_df,query)
         return jsonify(result)
     else:
         return jsonify({

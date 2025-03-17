@@ -91,3 +91,47 @@ body {
 .github-link:hover {
     color: #0d6efd;
 }
+/* 新增时间显示样式 */
+.post-meta {
+    margin-top: 10px;
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.9em;
+    color: #666;
+}
+
+.comment-meta {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 5px;
+    font-size: 0.8em;
+}
+
+/* 排序控件 */
+.sort-control {
+    max-width: 200px;
+    margin-left: auto;
+}
+
+/* 时间显示 */
+.post-time {
+    position: absolute;
+    bottom: 10px;
+    left: 10px;
+    color: #666;
+    font-size: 0.9em;
+}
+
+.comment-time {
+    font-size: 0.8em;
+    color: #999;
+    text-align: right;
+    margin-top: 5px;
+}
+
+/* 高亮样式 */
+mark {
+    background-color: #ffec99;
+    padding: 0 0.2em;
+    border-radius: 3px;
+}
