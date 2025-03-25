@@ -19,5 +19,8 @@ def initialize_duckdb():
         """)
         conn.close()
         print("duckdb init complete")
+        
 
 initialize_duckdb()  # 应用启动时初始化数据库
+
+
