@@ -144,11 +144,8 @@ def crawl_posts(start_id, end_id):
     
     print(f"📥 开始爬取帖子 ID {start_id} 到 {end_id}")
     
-    # 正式爬取模式：限制每次爬取数量，避免过载
-    max_crawl_count = 100  # 每次最多爬取100个帖子
-    if end_id - start_id > max_crawl_count:
-        print(f"⚠️ 爬取范围过大({end_id - start_id})，限制为{max_crawl_count}条")
-        start_id = end_id - max_crawl_count
+    # 正式爬取模式：爬取所有数据
+    print(f"📊 需要爬取 {end_id - start_id} 个帖子ID")
     
     # 使用正确的API端点和请求头
     headers = {
@@ -171,8 +168,8 @@ def crawl_posts(start_id, end_id):
     crawl_count = 0
     max_attempts = 3  # 最大重试次数
     
-    while current_id > start_id and crawl_count < max_crawl_count:
-        print(f"🔄 爬取帖子ID: {current_id} (进度: {crawl_count}/{max_crawl_count})")
+    while current_id > start_id:
+        print(f"🔄 爬取帖子ID: {current_id} (已爬取: {crawl_count} 条)")
         
         attempt = 0
         success = False
@@ -271,7 +268,7 @@ def crawl_posts(start_id, end_id):
                                 print(f"❌ 评论请求异常: {e}")
                                 break
                             
-                            time.sleep(0.4)  # 控制请求频率
+                            time.sleep(0.08)  # 控制请求频率
                     
                     # 更新根帖子分页ID（向低ID方向移动）
                     current_id = post_list[-1].get("id") - 1
@@ -284,7 +281,7 @@ def crawl_posts(start_id, end_id):
                     attempt += 1
                     if attempt < max_attempts:
                         print(f"🔄 重试第 {attempt} 次...")
-                        time.sleep(2)
+                        time.sleep(0.4)
                     else:
                         current_id -= 1
                         success = True  # 跳过这个ID
@@ -300,7 +297,7 @@ def crawl_posts(start_id, end_id):
                     current_id -= 1
                     success = True  # 跳过这个ID
         
-        time.sleep(0.6)  # 控制请求频率
+        time.sleep(0.12)  # 控制请求频率
     
     return all_posts
 
