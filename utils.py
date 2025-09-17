@@ -1,215 +1,188 @@
-import duckdb
-from openai import OpenAI
-from dashscope import Application
-from http import HTTPStatus
+import pandas as pd
 import os
 import json
-import pandas as pd
-from collections import deque
 import re
+from dashscope import Generation
+from http import HTTPStatus
+
+# 设置工作目录
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
-def initialize_duckdb():
-    """初始化DuckDB数据库，将CSV数据导入到持久化数据库中"""
-    db_path = './data/all.duckdb'
+def load_data():
+    """加载CSV数据"""
     csv_path = './data/all.csv'
-    if not os.path.exists(db_path):
-        conn = duckdb.connect(db_path)
-        # 添加时间字段处理
-        conn.execute(f"""
-            CREATE TABLE df AS 
-            SELECT *,
-                substr(post_code,1,4) || '-' || substr(post_code,5,2) || '-' || substr(post_code,7,2) as post_time 
-            FROM read_csv('{csv_path}')
-        """)
-        conn.close()
-
-initialize_duckdb()  # 应用启动时初始化数据库
-def filter_dataframe(keywords_list):
-    # ...前面代码保持不变...
-#     """使用DuckDB进行高效数据过滤"""
-    if not keywords_list or not all(keywords_list):
+    if not os.path.exists(csv_path):
+        return pd.DataFrame()
+    
+    try:
+        df = pd.read_csv(csv_path)
+        print(f"✅ 成功加载数据，共 {len(df)} 行")
+        return df
+    except Exception as e:
+        print(f"❌ 加载数据失败: {e}")
         return pd.DataFrame()
 
-    conn = duckdb.connect('./data/all.duckdb', read_only=True)
-    try:
-        # 构建动态查询条件
-        conditions = []
-        params = []
+def simple_search(keywords_list):
+    """简化的搜索功能"""
+    if not keywords_list:
+        return pd.DataFrame()
+    
+    # 过滤空关键词
+    keywords_list = [kw for kw in keywords_list if kw and kw.strip()]
+    if not keywords_list:
+        return pd.DataFrame()
+    
+    # 加载数据
+    df = load_data()
+    if df.empty:
+        return pd.DataFrame()
+    
+    # 简单搜索：只要内容包含任一关键词就匹配
+    mask = pd.Series([False] * len(df))
+    for keyword in keywords_list:
+        # 转义特殊字符，避免正则表达式错误
+        escaped_keyword = re.escape(keyword)
+        mask |= df['content'].str.contains(escaped_keyword, case=False, na=False)
+    
+    result = df[mask].copy()
+    print(f"🔍 搜索关键词 {keywords_list}，找到 {len(result)} 条结果")
+    return result
+
+def format_search_results(df, keywords_list):
+    """格式化搜索结果"""
+    if df.empty:
+        return {
+            "type": "exact",
+            "results": {
+                "posts": [{
+                    "id": 0,
+                    "content": "没有找到相关信息",
+                    "comments": []
+                }]
+            }
+        }
+    
+    # 高亮关键词
+    def highlight_keywords(text):
+        if pd.isna(text):
+            return ""
         for keyword in keywords_list:
-            conditions.append("content LIKE ?")
-            params.append(f"%{keyword}%")
-        where_clause = " AND ".join(conditions) if conditions else "1=0"
+            if keyword:
+                text = text.replace(keyword, f'<mark>{keyword}</mark>')
+        return text
+    
+    # 分组处理：根据post_code后缀区分主帖子和评论
+    # 主帖子：post_code以P1结尾，Root_code为空
+    # 评论：post_code以P2结尾，Root_code为主帖子的post_code
+    root_posts = df[(df['post_code'].str.endswith('P1')) & (df['Root_code'].isna())].copy()
+    
+    # 加载所有评论数据（不仅仅是搜索结果中的评论）
+    all_data = load_data()
+    all_comments = all_data[all_data['post_code'].str.endswith('P2')].copy()
+    
+    posts = []
+    for _, post in root_posts.iterrows():
+        # 获取该帖子的所有评论（从完整数据中获取）
+        post_comments = all_comments[all_comments['Root_code'] == post['post_code']]
         
-        query = f"""
-            WITH filtered_groups AS (
-                SELECT COALESCE(Root_code, post_code) AS group_id
-                FROM df
-                WHERE {where_clause}
-                GROUP BY group_id
-            )
-            SELECT *,
-                post_code  
-            FROM df
-            WHERE COALESCE(Root_code, post_code) IN (SELECT group_id FROM filtered_groups)
-        """
-        return conn.execute(query, params).fetchdf()
-    finally:
-        conn.close()
-def convert_df_to_forum(temp_df, keywords_list):
-    """使用DuckDB高效构建论坛数据结构"""
-    if temp_df.empty:
-        final={}
-        final["type"]="exact"
-        posts = []
-        posts.append({
-            "id": 0,
-            "content": "没有找到相关信息",
-            "comments": []
-        })
-        final["results"]={"posts": posts}
-        return {"posts": []}
-
-    conn = duckdb.connect()
-    try:
-        conn.register('temp_df', temp_df)
-        query = """
-            WITH main_posts AS (
-                SELECT 
-                    id,
-                    content,
-                    post_code,
-                    post_code
-                FROM temp_df WHERE Root_code IS NULL
-            ),
-            comments AS (
-                SELECT 
-                    id,
-                    content,
-                    post_code,
-                    Root_code
-                FROM temp_df WHERE Root_code IS NOT NULL
-            )
-            SELECT 
-                main.id,
-                main.content,
-                main.post_code,
-                COALESCE((
-                    SELECT json_group_array(json_object(
-                        'id', c.id, 
-                        'content', c.content,
-                        'post_code', c.post_code
-                    ))
-                    FROM comments c 
-                    WHERE c.Root_code = main.post_code
-                ), '[]') AS comments
-            FROM main_posts main
-        """
-        result = conn.execute(query).fetchall()
-        # 高亮处理逻辑
-        def highlight_keywords(text):
-            for keyword in keywords_list:
-                if keyword:
-                    text = text.replace(keyword, f'<mark>{keyword}</mark>')
-            return text
-
-        posts = []
-        for row in result:
-            highlighted_content = highlight_keywords(row[1])
-            comments = json.loads(row[3]) if row[3] else []
-            
-            highlighted_comments = []
-            for comment in comments:
-                comment['content'] = highlight_keywords(comment['content'])
-                highlighted_comments.append(comment)
-            
-            posts.append({
-                "id": row[0],
-                "content": highlighted_content,
-                "post_time": row[2],
-                "comments": highlighted_comments,
-                "comment_count": len(highlighted_comments)  # 添加评论数用于排序
+        comment_list = []
+        for _, comment in post_comments.iterrows():
+            comment_list.append({
+                "id": comment['id'],
+                "content": highlight_keywords(comment['content']),
+                "post_time": comment.get('time', ''),
+                "post_code": comment['post_code']
             })
-
-        # 添加默认按时间排序
-        posts.sort(key=lambda x: x['post_time'], reverse=True)
-        final={}
-        final["type"]="exact"
-        final["results"] = {"posts": posts}
-        return final
-    finally:
-        conn.close()
-
-
-def truncate_dataframe(df: pd.DataFrame, max_size: int) -> pd.DataFrame:
-    """截断DataFrame（保留Pandas处理小数据集）"""
-    # 原有实现保持不变，因处理的是过滤后的小数据
-    total_size = df.memory_usage(deep=True).sum()
-    if total_size <= max_size:
-        return df
+        
+        posts.append({
+            "id": post['id'],
+            "content": highlight_keywords(post['content']),
+            "post_time": post.get('time', ''),
+            "comments": comment_list,
+            "comment_count": post.get('comment_count', len(comment_list))
+        })
     
-    truncated_df = df.iloc[:1].copy()
-    for i in range(1, len(df)):
-        new_size = truncated_df.memory_usage(deep=True).sum() + df.iloc[i:i+1].memory_usage(deep=True).sum()
-        if new_size > max_size:
-            break
-        truncated_df = pd.concat([truncated_df, df.iloc[i:i+1]], ignore_index=True)
-    return truncated_df
-
-def AI_search(query):
-    """AI搜索处理逻辑（保持原有结构，适配DuckDB）"""
-    # 原有AI处理逻辑保持不变...
-    # 示例核心处理部分：
-    os.environ['DASHSCOPE_HTTP_BASE_URL'] = 'https://dashscope.aliyuncs.com/api/v1/'
-    print("msg sent")
-    stage1='''
-    你现在需要帮助一名中国人民大学的学生用户解决问题，用户需要从一个文字论坛中过滤出他所需要的信息。
-    接下来他会给出一个要求，请你根据这个要求给出一些相关的关键词，最终只返回一个元素为列表的列表，其中每个元素列表包含一些关键词。
-    关键词的选取原则是：如果当若干个关键词同时出现时代表了该文本可能包含用户所需要的信息，那么就将这些关键词作为关键词列表的一个元素。请返回尽可能多的列表
-    
-    如果用户的信息不是一个请求，或者你认为用户的信息和论坛可能的信息无关，那么请返回一个空列表。
-    
-    例如用户信息为：请帮我总结一下统计学院的保研率相关信息
-    那么你可以返回[['统计学院', '保研率'],['统院','保研率'],['统院','保研'],['统计学院','推免'],['统院','推免']]
-    
-    用户信息：
-    '''
-    stage1+=query
-    response = Application.call(
-        # 若没有配置环境变量，可用百炼API Key将下行替换为：api_key="sk-xxx"。但不建议在生产环境中直接将API Key硬编码到代码中，以减少API Key泄露风险。
-        api_key='',
-        app_id='c3cc0a7b365d4b2da7cb88ebd1aef1a0',# 替换为实际的应用 ID
-        prompt=stage1)
-    if response.status_code != HTTPStatus.OK:
-        print(f'request_id={response.request_id}')
-        print(f'code={response.status_code}')
-        print(f'message={response.message}')
-        print(f'请参考文档：https://help.aliyun.com/zh/model-studio/developer-reference/error-code')
-    print(response.output.text)
+    # 按时间排序（如果有post_code的话）
     try:
-        keywd_list=eval(response.output.text)
+        posts.sort(key=lambda x: x['post_time'], reverse=True)
     except:
-        keywd_list=[]
-    if keywd_list==[]:
-        return "出错啦！可能是因为您的输入不是一个请求或者AI出现了幻觉，请重新搜索"
+        pass
     
-    target_df = filter_dataframe(keywd_list[0])
-    target_df = truncate_dataframe(target_df, 1024*512)
-    
-    # 保存和后续处理
-    target_df.to_csv('./data/target.csv', index=False)
-    forum_data = convert_df_to_forum(target_df)
-    
-    # ...后续处理逻辑
-    stage2='''
-    你现在需要帮助一名中国人民大学的学生用户从下面的格式化消息中总结信息。信息：
-    '''
-    stage2+=str(forum_data)
-    stage2+="\n用户请求："
-    stage2+=query   
-    response = Application.call(
-        # 若没有配置环境变量，可用百炼API Key将下行替换为：api_key="sk-xxx"。但不建议在生产环境中直接将API Key硬编码到代码中，以减少API Key泄露风险。
-        api_key='',
-        app_id='c3cc0a7b365d4b2da7cb88ebd1aef1a0',# 替换为实际的应用 ID
-        prompt=stage2)
-    return response.output.text
+    return {
+        "type": "exact",
+        "results": {"posts": posts}
+    }
+
+def ai_search(query):
+    """简化的AI搜索"""
+    try:
+        # 设置API
+        os.environ['DASHSCOPE_HTTP_BASE_URL'] = 'https://dashscope.aliyuncs.com/api/v1/'
+        
+        # 第一阶段：生成关键词
+        stage1 = f'''
+        你现在需要帮助一名中国人民大学的学生用户解决问题，用户需要从一个文字论坛中过滤出他所需要的信息。
+        接下来他会给出一个要求，请你根据这个要求给出一些相关的关键词，最终只返回一个元素为列表的列表，其中每个元素列表包含一些关键词。
+        关键词的选取原则是：如果当若干个关键词同时出现时代表了该文本可能包含用户所需要的信息，那么就将这些关键词作为关键词列表的一个元素。请返回尽可能多的列表
+        
+        如果用户的信息不是一个请求，或者你认为用户的信息和论坛可能的信息无关，那么请返回一个空列表。
+        
+        例如用户信息为：请帮我总结一下统计学院的保研率相关信息
+        那么你可以返回[['统计学院', '保研率'],['统院','保研率'],['统院','保研'],['统计学院','推免'],['统院','推免']]
+        
+        用户信息：{query}
+        '''
+        
+        response = Generation.call(
+            api_key='',  # 需要配置API密钥
+            model='qwen-plus',
+            prompt=stage1
+        )
+        
+        if response.status_code != HTTPStatus.OK:
+            return f"AI服务暂时不可用，请稍后再试"
+        
+        try:
+            keywords_list = eval(response.output.text)
+        except:
+            keywords_list = []
+        
+        if not keywords_list:
+            return "抱歉，我无法理解您的请求，请尝试更具体的描述"
+        
+        # 使用第一个关键词组合进行搜索
+        search_result = simple_search(keywords_list[0])
+        
+        if search_result.empty:
+            return "没有找到相关信息，请尝试其他关键词"
+        
+        # 限制结果数量
+        if len(search_result) > 50:
+            search_result = search_result.head(50)
+        
+        # 第二阶段：AI总结
+        stage2 = f'''
+        你现在需要帮助一名中国人民大学的学生用户从下面的论坛信息中总结相关内容。
+        
+        论坛信息：
+        {search_result[['content']].to_string()}
+        
+        用户请求：{query}
+        
+        请用简洁明了的中文总结相关信息，重点突出用户关心的内容。
+        '''
+        
+        response2 = Generation.call(
+            api_key='',  # 需要配置API密钥
+            model='qwen-plus',
+            prompt=stage2
+        )
+        
+        if response2.status_code == HTTPStatus.OK:
+            return response2.output.text
+        else:
+            return "AI总结服务暂时不可用，但已找到相关帖子"
+            
+    except Exception as e:
+        print(f"AI搜索出错: {e}")
+        return "AI搜索服务暂时不可用，请使用精确搜索"

@@ -131,20 +131,30 @@ function renderExactResults(posts) {
         </div>
         ${posts.map(post => `
             <div class="post-card position-relative">
-                <h4 class="post-title" onclick="toggleComments(this)">${post.id}</h4>
+                <div class="post-header" onclick="toggleComments(this)">
+                    <h4 class="post-title">${post.id}</h4>
+                    <div class="post-meta">
+                        <span class="post-time">${post.post_time || ''}</span>
+                        ${post.comment_count > 0 ? 
+                            `<span class="comment-count-badge">${post.comment_count}条评论</span>` : 
+                            '<span class="comment-count-badge">暂无评论</span>'
+                        }
+                    </div>
+                </div>
                 <div class="post-content">${post.content}</div>
-                <div class="post-time">${post.post_time}</div>
-                ${post.comments.length > 0 ? 
-                    `<div class="comment-count">${post.comment_count}条评论</div>
-                    <div class="comments" style="display:none;">
-                        ${post.comments.map(comment => `
+                ${post.comment_count > 0 && post.comments && post.comments.length > 0 ? 
+                    `<div class="comments" style="display:none;">
+                        <div class="comments-header">评论列表</div>
+                        ${(post.comments || []).map(comment => `
                             <div class="comment-item">
-                                <strong>${comment.id}</strong>: ${comment.content}
-                                <div class="comment-time">${comment.post_time}</div>
+                                <div class="comment-header">
+                                    <span class="comment-id">#${comment.id}</span>
+                                    <span class="comment-time">${comment.post_time || ''}</span>
+                                </div>
+                                <div class="comment-content">${comment.content}</div>
                             </div>
                         `).join('')}
-                    </div>` : 
-                    '<div class="comment-count">暂无评论</div>'
+                    </div>` : ''
                 }
             </div>
         `).join('')}
@@ -191,9 +201,22 @@ function sortPosts(type) {
 
 // 修改全局函数
 function toggleComments(element) {
-    const commentsDiv = element.parentElement.querySelector('.comments');
+    const postCard = element.closest('.post-card');
+    const commentsDiv = postCard.querySelector('.comments');
+    const postHeader = postCard.querySelector('.post-header');
+    
     if (commentsDiv) {
-        commentsDiv.style.display = commentsDiv.style.display === 'none' ? 'block' : 'none';
+        const isHidden = commentsDiv.style.display === 'none' || commentsDiv.style.display === '';
+        commentsDiv.style.display = isHidden ? 'block' : 'none';
+        
+        // 添加视觉反馈
+        if (postHeader) {
+            if (isHidden) {
+                postHeader.classList.add('expanded');
+            } else {
+                postHeader.classList.remove('expanded');
+            }
+        }
     }
 }
 // function toggleComments(element) {
